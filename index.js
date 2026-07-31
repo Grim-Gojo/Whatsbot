@@ -28,17 +28,20 @@ async function startBot() {
         const { connection, lastDisconnect } = update;
 
         if (connection === 'close') {
-            const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
-            console.log('Connection closed, reconnecting...', shouldReconnect);
-            if (shouldReconnect) {
-                setTimeout(startBot, 5000);
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+            console.log(`Connection closed due to statusCode ${statusCode}, reconnecting...`);
+            
+            if (statusCode !== DisconnectReason.loggedOut) {
+                setTimeout(startBot, 3000);
+            } else {
+                console.log('Session logged out. Please clear auth_info and restart.');
             }
         } else if (connection === 'open') {
             console.log('✅ WhatsApp Bot connected successfully!');
+            pairingCodeRequested = false; // Reset flag on successful connection
         }
     });
 
-    // Request pairing code safely only once if not registered
     if (!sock.authState.creds.registered && !pairingCodeRequested) {
         pairingCodeRequested = true;
         const phoneNumber = process.env.OWNER_NUMBER;
@@ -54,7 +57,7 @@ async function startBot() {
                     console.log("========================================\n");
                 } catch (err) {
                     console.error("Pairing code error:", err.message);
-                    pairingCodeRequested = false; // Allow retry if it failed
+                    pairingCodeRequested = false;
                 }
             }, 6000);
         }
@@ -74,3 +77,4 @@ async function startBot() {
 }
 
 startBot();
+
