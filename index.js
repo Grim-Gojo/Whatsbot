@@ -1,93 +1,210 @@
-/**
- * ============================================================
- * TEMPORARY ONE-
-}
+require("dotenv").config();
 
-startBot().catch((err) => {
-  console.error('[startup] Fatal erroconst { makeWASocket, useMultiFileAuthState, DisconnectReason, Browsers } = require('@whiskeysockets/baileys');
-const express = require('express');
-const fs = require('fs');
+const express = require("express");
+const fs = require("fs");
+const path = require("path");
+const P = require("pino");
+
+const {
+    default: makeWASocket,
+    useMultiFileAuthState,
+    fetchLatestBaileysVersion,
+    DisconnectReason,
+    Browsers
+} = require("@whiskeysockets/baileys");
 
 const app = express();
+
 const PORT = process.env.PORT || 3000;
 
-app.get('/', (req, res) => {
-    res.send('WhatsApp Bot is running!');
-});
+const OWNER_NUMBER = (process.env.OWNER_NUMBER || "").replace(/\D/g, "");
 
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Web server listening on port ${PORT}`);
-});
+const AUTH_DIR = path.join(__dirname, "auth_info");
 
-let pairingCodeRequested = false;
-
-async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-    
-    const sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false,
-        browser: Browsers.macOS("Chrome")
-    });
-
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
-
-        if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            console.log(`Connection closed due to statusCode ${statusCode}, reconnecting...`);
-            
-            // Only clear session data on real logouts or unauthorized errors
-            if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                console.log('Session expired or logged out. Clearing auth_info for a fresh code...');
-                try {
-                    fs.rmSync('auth_info', { recursive: true, force: true });
-                } catch (e) {}
-                pairingCodeRequested = false;
-            }
-            
-            setTimeout(startBot, 3000);
-        } else if (connection === 'open') {
-            console.log('✅ WhatsApp Bot connected successfully!');
-            pairingCodeRequested = false;
-        }
-    });
-
-    if (!sock.authState.creds.registered && !pairingCodeRequested) {
-        pairingCodeRequested = true;
-        const phoneNumber = process.env.OWNER_NUMBER;
-        if (phoneNumber) {
-            setTimeout(async () => {
-                try {
-                    const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-                    console.log(`Requesting pairing code for ${cleanNumber}...`);
-                    let code = await sock.requestPairingCode(cleanNumber);
-                    code = code?.match(/.{1,4}/g)?.join("-") || code;
-                    console.log("\n========================================");
-                    console.log(`  YOUR PAIRING CODE: ${code}`);
-                    console.log("========================================\n");
-                } catch (err) {
-                    console.error("Pairing code error:", err.message);
-                    pairingCodeRequested = false;
-                }
-            }, 6000);
-        }
-    }
-
-    sock.ev.on('messages.upsert', async (m) => {
-        const msg = m.messages[0];
-        if (!msg.message || msg.key.fromMe) return;
-
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
-        const from = msg.key.remoteJid;
-
-        if (text === '!ping') {
-            await sock.sendMessage(from, { text: 'Pong! 🏓' });
-        }
-    });
+if (!OWNER_NUMBER) {
+    console.error("❌ OWNER_NUMBER is missing.");
+    process.exit(1);
 }
 
-startBot();
-r starting bot:'
+let lastPairingCode = null;
+let pairingInProgress = false;
+let connectionStatus = "Starting";
+
+const PAIRING_COOLDOWN = 45000;
+
+app.get("/", (req, res) => {
+    res.send({
+        status: connectionStatus,
+        paired: connectionStatus === "Connected",
+        pairingCode: lastPairingCode
+    });
+});
+
+app.get("/pairing-code", (req, res) => {
+    if (connectionStatus === "Connected") {
+        return res.send("Bot already connected.");
+    }
+
+    if (!lastPairingCode) {
+        return res.send("Pairing code not available yet.");
+    }
+
+    res.send(lastPairingCode);
+});
+
+app.listen(PORT, "0.0.0.0", () => {
+    console.log(`✅ Server running on port ${PORT}`);
+});
+
+async function requestPairing(sock) {
+    if (pairingInProgress) return;
+
+    pairingInProgress = true;
+
+    try {
+        if (sock.authState?.creds?.registered) {
+            pairingInProgress = false;
+            return;
+        }
+
+        const code = await sock.requestPairingCode(OWNER_NUMBER);
+
+        lastPairingCode = code;
+
+        console.log("");
+        console.log("====================================");
+        console.log("PAIRING CODE");
+        console.log(code);
+        console.log("====================================");
+        console.log("");
+
+    } catch (err) {
+        console.log("Pairing request failed.");
+        console.log(err.message);
+    }
+
+    setTimeout(() => {
+        pairingInProgress = false;
+    }, PAIRING_COOLDOWN);
+}
+
+async function startBot() {
+    const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+
+    const { version, isLatest } = await fetchLatestBaileysVersion();
+
+    console.log(
+        `Using WhatsApp protocol ${version.join(".")} (Latest: ${isLatest})`
+    );
+
+    const sock = makeWASocket({
+        version,
+        auth: state,
+        browser: Browsers.macOS("Chrome"),
+        logger: P({ level: "silent" }),
+        printQRInTerminal: false
+    });
+
+    sock.ev.on("creds.update", saveCreds);
+
+    sock.ev.on("connection.update", async (update) => {
+        const { connection, lastDisconnect } = update;
+
+        if (connection === "connecting") {
+            connectionStatus = "Connecting";
+            await requestPairing(sock);
+        }
+
+        if (connection === "open") {
+            connectionStatus = "Connected";
+            lastPairingCode = null;
+
+            console.log("");
+            console.log("=================================");
+            console.log("WhatsApp Connected Successfully");
+            console.log("=================================");
+            console.log("");
+        }
+
+        if (connection === "close") {
+            connectionStatus = "Disconnected";
+
+            const statusCode = lastDisconnect?.error?.output?.statusCode;
+
+            console.log("Disconnected:", statusCode);
+
+            const loggedOut =
+                statusCode === DisconnectReason.loggedOut ||
+                statusCode === 401;
+
+            if (loggedOut) {
+                console.log("Logged out. Clearing old session...");
+
+                try {
+                    fs.rmSync(AUTH_DIR, {
+                        recursive: true,
+                        force: true
+                    });
+                } catch (e) {}
+
+                setTimeout(() => {
+                    startBot();
+                }, 5000);
+
+                return;
+            }
+
+            console.log("Reconnecting...");
+
+            setTimeout(() => {
+                startBot();
+            }, 3000);
+        }
+    });
+
+    sock.ev.on("messages.upsert", async ({ messages, type }) => {
+        if (type !== "notify") return;
+
+        for (const msg of messages) {
+            if (!msg.message) continue;
+            if (msg.key.fromMe) continue;
+
+            const chatId = msg.key.remoteJid;
+
+            const text =
+                msg.message.conversation ||
+                msg.message.extendedTextMessage?.text ||
+                "";
+
+            console.log(`[MESSAGE] ${chatId}: ${text}`);
+
+            const command = text.trim().toLowerCase();
+
+            if (command === "ping") {
+                await sock.sendMessage(chatId, {
+                    text: "🏓 Pong!"
+                });
+            }
+        }
+    });
+
+    return sock;
+}
+
+startBot()
+    .then(() => {
+        console.log("Bot started.");
+    })
+    .catch((err) => {
+        console.error("Fatal startup error:", err);
+        process.exit(1);
+    });
+
+process.on("unhandledRejection", (reason) => {
+    console.error("Unhandled Rejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+    console.error("Uncaught Exception:", err);
+});
+           
