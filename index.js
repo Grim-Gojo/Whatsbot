@@ -1,4 +1,26 @@
 /**
+ * ============================================================
+ * TEMPORARY ONE-TIME CLEANUP — force-clears a stale/corrupted
+ * auth_info folder (fixes "Bad MAC Error" / "No matching sessions
+ * found"). Leave this in for ONE deploy, confirm the log line
+ * below appears, then DELETE this block and redeploy again so it
+ * doesn't wipe your session on every future restart.
+ * ============================================================
+ */
+const fsCleanup = require('fs');
+try {
+  fsCleanup.rmSync('./auth_info', { recursive: true, force: true });
+  console.log('[cleanup] auth_info cleared manually — remove this block after confirming this log line.');
+} catch (err) {
+  console.log('[cleanup] Nothing to clear or error:', err.message);
+}
+/**
+ * ============================================================
+ * END TEMPORARY CLEANUP BLOCK
+ * ============================================================
+ */
+
+/**
  * WhatsApp bot (Baileys) — hardened for Render deployment.
  *
  * Fixes applied vs. the previous version:
@@ -13,10 +35,6 @@
  *     so you don't lose a session that was actually fine.
  *  4. Express server binds to 0.0.0.0 and process.env.PORT, required
  *     for Render's port detection.
- *  5. Removed the one-time cleanup block that was force-deleting
- *     auth_info on EVERY startup (this was the cause of the endless
- *     logout/re-pair loop and WhatsApp rate-limiting your pairing
- *     code requests).
  */
 
 require('dotenv').config();
@@ -41,6 +59,11 @@ if (!OWNER_NUMBER) {
   process.exit(1);
 }
 
+// ---------------------------------------------------------------
+// Express health-check server (Render needs an open port to detect
+// the service as "live" — this alone doesn't do anything for
+// WhatsApp, it just satisfies the platform).
+// ---------------------------------------------------------------
 const app = express();
 const PORT = process.env.PORT || 3000;
 
@@ -51,6 +74,8 @@ app.get('/', (req, res) => {
   res.send(`WhatsApp bot status: ${connectionStatus}`);
 });
 
+// Handy for checking the current pairing code from a browser if you
+// miss it in the logs — visit /pairing-code on your Render URL.
 app.get('/pairing-code', (req, res) => {
   if (connectionStatus === 'connected') {
     return res.send('Already connected — no pairing code needed.');
@@ -62,12 +87,18 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`[server] Listening on 0.0.0.0:${PORT}`);
 });
 
+// ---------------------------------------------------------------
+// Pairing-code guard: prevents requesting a new code every time the
+// socket reconnects. Once a code is requested, we wait a full
+// cooldown window before allowing another request, even if the
+// socket bounces in the meantime.
+// ---------------------------------------------------------------
 let pairingInProgress = false;
-const PAIRING_COOLDOWN_MS = 45_000;
+const PAIRING_COOLDOWN_MS = 45_000; // 45 seconds to actually type the code in
 
 async function maybeRequestPairingCode(sock) {
-  if (sock.authState.creds.registered) return;
-  if (pairingInProgress) return;
+  if (sock.authState.creds.registered) return; // already linked
+  if (pairingInProgress) return; // a code was just issued, don't spam another
 
   pairingInProgress = true;
   try {
@@ -88,6 +119,9 @@ async function maybeRequestPairingCode(sock) {
   }
 }
 
+// ---------------------------------------------------------------
+// Main connection logic
+// ---------------------------------------------------------------
 async function startBot() {
   const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
   const { version, isLatest } = await fetchLatestBaileysVersion();
@@ -97,8 +131,8 @@ async function startBot() {
     version,
     auth: state,
     browser: Browsers.macOS('Chrome'),
-    logger: P({ level: 'silent' }),
-    printQRInTerminal: false,
+    logger: P({ level: 'silent' }), // set to 'debug' if you need verbose Baileys logs
+    printQRInTerminal: false, // we use pairing codes, not QR
   });
 
   sock.ev.on('creds.update', saveCreds);
@@ -106,6 +140,8 @@ async function startBot() {
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
 
+    // Request a pairing code once we have a live socket and aren't
+    // registered yet.
     if (connection === 'connecting' || connection === undefined) {
       await maybeRequestPairingCode(sock);
     }
@@ -132,29 +168,30 @@ async function startBot() {
         } catch (err) {
           console.error('[baileys] Failed to clear auth_info:', err.message);
         }
+        // Give WhatsApp's servers a moment before trying again, so we
+        // don't hammer them with rapid re-pairing attempts.
         setTimeout(startBot, 5000);
         return;
       }
 
+      // Any other disconnect (timeouts, network blips, restarts
+      // WhatsApp itself requests) — just reconnect using the SAME
+      // auth_info. Do not wipe it.
       console.log('[baileys] Reconnecting with existing session...');
       setTimeout(startBot, 3000);
       return;
     }
   });
 
+  // ---------------------------------------------------------------
+  // Basic incoming message logging (replace/expand with your real
+  // feature routing — weather, jokes, AI replies, etc.)
+  // ---------------------------------------------------------------
   sock.ev.on('messages.upsert', async ({ messages, type }) => {
     if (type !== 'notify') return;
 
     for (const msg of messages) {
-      // TEMPORARY FOR TESTING: normally this line also checks
-      // `|| msg.key.fromMe` to skip messages you send yourself, so
-      // the bot doesn't reply to its own messages in a loop. That
-      // check is removed here ONLY so "Message yourself" testing
-      // works. Put `|| msg.key.fromMe` back once testing is done —
-      // see the note right below.
-      if (!msg.message) continue;
-      // ORIGINAL LINE (restore this after testing):
-      // if (!msg.message || msg.key.fromMe) continue;
+      if (!msg.message || msg.key.fromMe) continue;
 
       const chatId = msg.key.remoteJid;
       const text =
@@ -164,6 +201,7 @@ async function startBot() {
 
       console.log(`[message] from ${chatId}: ${text}`);
 
+      // Example reply — replace this with your real feature router.
       if (text.trim().toLowerCase() === 'ping') {
         await sock.sendMessage(chatId, { text: 'pong 🏓' });
       }
@@ -181,4 +219,3 @@ startBot().catch((err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('[process] Unhandled rejection:', reason);
 });
-      
