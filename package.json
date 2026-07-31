@@ -1,18 +1,15 @@
 {
-  "name": "whatsbot-baileys",
+  "name": "whatsbot",
   "version": "1.0.0",
-  "description": "WhatsApp bot using Baileys, hardened for Render deployment (pairing-code cooldown, safe reconnect logic).",
+  "description": "WhatsApp Bot powered by Baileys and Gemini AI",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
-    "@whiskeysockets/baileys": "^6.7.9",
-    "express": "^4.19.2",
+    "@whiskeysockets/baileys": "latest",
     "dotenv": "^16.4.5",
-    "pino": "^9.4.0"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "express": "^4.19.2",
+    "pino": "^9.0.0"
   }
 }
