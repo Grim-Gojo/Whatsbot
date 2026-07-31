@@ -1,88 +1,286 @@
-const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
+/**
+ * WhatsApp bot (Bail/**
+ * WhatsApp bot (Baileys) — hardened for Render deployment.
+ *
+ * Fixes applied vs. the previous version:
+ *  1. Always fetches the LATEST Baileys/WhatsApp protocol version at
+ *     startup instead of relying on whatever the library defaults to.
+ *  2. Pairing code requests are now GUARDED — only one code is
+ *     requested at a time, with a cooldown, so a reconnect loop can't
+ *     spam WhatsApp with new codes before you've had a chance to type
+ *     one in.
+ *  3. auth_info is only wiped on a REAL logout (loggedOut / 401),
+ *     never on ordinary reconnects (408 timeouts, network hiccups),
+ *     so you don't lose a session that was actually fine.
+ *  4. Express server binds to 0.0.0.0 and process.env.PORT, required
+ *     for Render's port detection.
+ */
+
+require('dotenv').config();
 const express = require('express');
 const fs = require('fs');
+const path = require('path');
+const P = require('pino');
 
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  DisconnectReason,
+  Browsers,
+} = require('@whiskeysockets/baileys');
+
+const AUTH_DIR = path.join(__dirname, 'auth_info');
+const OWNER_NUMBER = (process.env.OWNER_NUMBER || '').replace(/[^0-9]/g, '');
+
+if (!OWNER_NUMBER) {
+  console.error('[startup] OWNER_NUMBER is missing or empty. Set it in your environment variables — digits only, e.g. 2348012345678');
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------
+// Express health-check server (Render needs an open port to detect
+// the service as "live" — this alone doesn't do anything for
+// WhatsApp, it just satisfies the platform).
+// ---------------------------------------------------------------
 const app = express();
 const PORT = process.env.PORT || 3000;
 
+let lastPairingCode = null;
+let connectionStatus = 'starting';
+
 app.get('/', (req, res) => {
-    res.send('WhatsApp Bot is running!');
+  res.send(`WhatsApp bot status: ${connectionStatus}`);
+});
+
+// Handy for checking the current pairing code from a browser if you
+// miss it in the logs — visit /pairing-code on your Render URL.
+app.get('/pairing-code', (req, res) => {
+  if (connectionStatus === 'connected') {
+    return res.send('Already connected — no pairing code needed.');
+  }
+  res.send(lastPairingCode ? `Current pairing code: ${lastPairingCode}` : 'No pairing code generated yet — check back in a few seconds.');
 });
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Web server listening on port ${PORT}`);
+  console.log(`[server] Listening on 0.0.0.0:${PORT}`);
 });
 
-let pairingCodeRequested = false;
+// ---------------------------------------------------------------
+// Pairing-code guard: prevents requesting a new code every time the
+// socket reconnects. Once a code is requested, we wait a full
+// cooldown window before allowing another request, even if the
+// socket bounces in the meantime.
+// ---------------------------------------------------------------
+let pairingInProgress = false;
+const PAIRING_COOLDOWN_MS = 45_000; // 45 seconds to actually type the code in
 
-async function startBot() {
-    const { state, saveCreds } = await useMultiFileAuthState('auth_info');
-    
-    const sock = makeWASocket({
-        auth: state,
-        printQRInTerminal: false
-    });
+async function maybeRequestPairingCode(sock) {
+  if (sock.authState.creds.registered) return; // already linked
+  if (pairingInProgress) return; // a code was just issued, don't spam another
 
-    sock.ev.on('creds.update', saveCreds);
-
-    sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect } = update;
-
-        if (connection === 'close') {
-            const statusCode = lastDisconnect?.error?.output?.statusCode;
-            console.log(`Connection closed due to statusCode ${statusCode}, reconnecting...`);
-            
-            // If session is logged out or unauthorized (401), clear auth and retry fresh
-            if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
-                console.log('Session expired or logged out. Clearing auth_info for a fresh code...');
-                try {
-                    fs.rmSync('auth_info', { recursive: true, force: true });
-                } catch (e) {}
-                pairingCodeRequested = false;
-                setTimeout(startBot, 3000);
-            } else {
-                setTimeout(startBot, 3000);
-            }
-        } else if (connection === 'open') {
-            console.log('✅ WhatsApp Bot connected successfully!');
-            pairingCodeRequested = false;
-        }
-    });
-
-    if (!sock.authState.creds.registered && !pairingCodeRequested) {
-        pairingCodeRequested = true;
-        const phoneNumber = process.env.OWNER_NUMBER;
-        if (phoneNumber) {
-            setTimeout(async () => {
-                try {
-                    const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
-                    console.log(`Requesting pairing code for ${cleanNumber}...`);
-                    let code = await sock.requestPairingCode(cleanNumber);
-                    code = code?.match(/.{1,4}/g)?.join("-") || code;
-                    console.log("\n========================================");
-                    console.log(`  YOUR PAIRING CODE: ${code}`);
-                    console.log("========================================\n");
-                } catch (err) {
-                    console.error("Pairing code error:", err.message);
-                    pairingCodeRequested = false;
-                }
-            }, 6000);
-        }
-    }
-
-    sock.ev.on('messages.upsert', async (m) => {
-        const msg = m.messages[0];
-        if (!msg.message || msg.key.fromMe) return;
-
-        const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
-        const from = msg.key.remoteJid;
-
-        if (text === '!ping') {
-            await sock.sendMessage(from, { text: 'Pong! 🏓' });
-        }
-    });
+  pairingInProgress = true;
+  try {
+    const code = await sock.requestPairingCode(OWNER_NUMBER);
+    lastPairingCode = code;
+    console.log('==================================================');
+    console.log(' YOUR PAIRING CODE:', code);
+    console.log(' Open WhatsApp on your phone > Linked Devices >');
+    console.log(' Link a Device > Link with phone number instead,');
+    console.log(' then type this code within the next 45 seconds.');
+    console.log('==================================================');
+  } catch (err) {
+    console.error('[pairing] Failed to request pairing code:', err.message);
+  } finally {
+    setTimeout(() => {
+      pairingInProgress = false;
+    }, PAIRING_COOLDOWN_MS);
+  }
 }
 
-startBot();
+// ---------------------------------------------------------------
+// Main connection logic
+// ---------------------------------------------------------------
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+  const { version, isLatest } = await fetchLatestBaileysVersion();
+  console.log(`[baileys] Using WA protocol v${version.join('.')} (latest: ${isLatest})`);
 
+  const sock = makeWASocket({
+    version,
+    auth: state,
+    browser: Browsers.macOS('Chrome'),
+    logger: P({ level: 'silent' }), // set to 'debug' if you need verbose Baileys logs
+    printQRInTerminal: false, // we use pairing codes, not QR
+  });
 
+  sock.ev.on('creds.update', saveCreds);
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect } = update;
+
+    // Request a pairing code once we have a live socket and aren't
+    // registered yet.
+    if (connection === 'connecting' || connection === undefined) {
+      await maybeRequestPairingCode(sock);
+    }
+
+    if (connection === 'open') {
+      connectionStatus = 'connected';
+      lastPairingCode = null;
+      console.log('[baileys] Connected and linked successfully.');
+    }
+
+    if (connection === 'close') {
+      const statusCode = lastDisconnect?.error?.output?.statusCode;
+      const reasonText = DisconnectReason[statusCode] || `unknown (${statusCode})`;
+      connectionStatus = 'disconnected';
+      console.warn(`[baileys] Connection closed. Reason: ${reasonText} (${statusCode})`);
+
+      const isRealLogout =
+        statusCode === DisconnectReason.loggedOut || statusCode === 401;
+
+      if (isRealLogout) {
+        console.warn('[baileys] Real logout detected — clearing auth_info for a fresh pairing.');
+        try {
+          fs.rmSync(AUTH_DIR, { recursive: true, force: true });
+        } catch (err) {
+          console.error('[baileys] Failed to clear auth_info:', err.message);
+        }
+        // Give WhatsApp's servers a moment before trying again, so we
+        // don't hammer them with rapid re-pairing attempts.
+        setTimeout(startBot, 5000);
+        return;
+      }
+
+      // Any other disconnect (timeouts, network blips, restarts
+      // WhatsApp itself requests) — just reconnect using the SAME
+      // auth_info. Do not wipe it.
+      console.log('[baileys] Reconnecting with existing session...');
+      setTimeout(startBot, 3000);
+      return;
+    }
+  });
+
+  // ---------------------------------------------------------------
+  // Basic incoming message logging (replace/expand with your real
+  // feature routing — weather, jokes, AI replies, etc.)
+  // ---------------------------------------------------------------
+  sock.ev.on('messages.upsert', async ({ messages, type }) => {
+    if (type !== 'notify') return;
+
+    for (const msg of messages) {
+      if (!msg.message || msg.key.fromMe) continue;
+
+      const chatId = msg.key.remoteJid;
+      const text =
+        msg.message.conversation ||
+        msg.message.extendedTextMessage?.text ||
+        '';
+
+      console.log(`[message] from ${chatId}: ${text}`);
+
+      // Example reply — replace this with your real feature router.
+      if (text.trim().toLowerCase() === 'ping') {
+        await sock.sendMessage(chatId, { text: 'pong 🏓' });
+      }
+    }
+  });
+
+  return sock;
+}
+
+startBot().catch((err) => {
+  console.error('[startup] Fatal error starting bot:', err);
+  process.exit(1);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[process] Unhandled rejection:', reason);
+});
+eys) — hardened for Render deployment.
+ *
+ * Fixes applied vs. the previous version:
+ *  1. Always fetches the LATEST Baileys/WhatsApp protocol version at
+ *     startup instead of relying on whatever the library defaults to.
+ *  2. Pairing code requests are now GUARDED — only one code is
+ *     requested at a time, with a cooldown, so a reconnect loop can't
+ *     spam WhatsApp with new codes before you've had a chance to type
+ *     one in.
+ *  3. auth_info is only wiped on a REAL logout (loggedOut / 401),
+ *     never on ordinary reconnects (408 timeouts, network hiccups),
+ *     so you don't lose a session that was actually fine.
+ *  4. Express server binds to 0.0.0.0 and process.env.PORT, required
+ *     for Render's port detection.
+ */
+
+require('dotenv').config();
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const P = require('pino');
+
+const {
+  default: makeWASocket,
+  useMultiFileAuthState,
+  fetchLatestBaileysVersion,
+  DisconnectReason,
+  Browsers,
+} = require('@whiskeysockets/baileys');
+
+const AUTH_DIR = path.join(__dirname, 'auth_info');
+const OWNER_NUMBER = (process.env.OWNER_NUMBER || '').replace(/[^0-9]/g, '');
+
+if (!OWNER_NUMBER) {
+  console.error('[startup] OWNER_NUMBER is missing or empty. Set it in your environment variables — digits only, e.g. 2348012345678');
+  process.exit(1);
+}
+
+// ---------------------------------------------------------------
+// Express health-check server (Render needs an open port to detect
+// the service as "live" — this alone doesn't do anything for
+// WhatsApp, it just satisfies the platform).
+// ---------------------------------------------------------------
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+let lastPairingCode = null;
+let connectionStatus = 'starting';
+
+app.get('/', (req, res) => {
+  res.send(`WhatsApp bot status: ${connectionStatus}`);
+});
+
+// Handy for checking the current pairing code from a browser if you
+// miss it in the logs — visit /pairing-code on your Render URL.
+app.get('/pairing-code', (req, res) => {
+  if (connectionStatus === 'connected') {
+    return res.send('Already connected — no pairing code needed.');
+  }
+  res.send(lastPairingCode ? `Current pairing code: ${lastPairingCode}` : 'No pairing code generated yet — check back in a few seconds.');
+});
+
+app.listen(PORT, '0.0.0.0', () => {
+  console.log(`[server] Listening on 0.0.0.0:${PORT}`);
+});
+
+// ---------------------------------------------------------------
+// Pairing-code guard: prevents requesting a new code every time the
+// socket reconnects. Once a code is requested, we wait a full
+// cooldown window before allowing another request, even if the
+// socket bounces in the meantime.
+// ---------------------------------------------------------------
+let pairingInProgress = false;
+const PAIRING_COOLDOWN_MS = 45_000; // 45 seconds to actually type the code in
+
+async function maybeRequestPairingCode(sock) {
+  if (sock.authState.creds.registered) return; // already linked
+  if (pairingInProgress) return; // a code was just issued, don't spam another
+
+  pairingInProgress = true;
+  try {
+    const code = await sock.requestPairingCode(OWNER_NUMBER);
+    lastPairingCode = code;
+    console.log('==================================================');
+    console.log(' YOUR PAIRING CODE:', code);
+    console.log(' Open WhatsApp on your phone > Linked Devices >');
