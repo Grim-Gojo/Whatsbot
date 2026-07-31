@@ -12,6 +12,8 @@ app.listen(PORT, '0.0.0.0', () => {
     console.log(`Web server listening on port ${PORT}`);
 });
 
+let pairingCodeRequested = false;
+
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
     
@@ -36,8 +38,9 @@ async function startBot() {
         }
     });
 
-    // Safely request pairing code after socket initializes
-    if (!sock.authState.creds.registered) {
+    // Request pairing code safely only once if not registered
+    if (!sock.authState.creds.registered && !pairingCodeRequested) {
+        pairingCodeRequested = true;
         const phoneNumber = process.env.OWNER_NUMBER;
         if (phoneNumber) {
             setTimeout(async () => {
@@ -51,6 +54,7 @@ async function startBot() {
                     console.log("========================================\n");
                 } catch (err) {
                     console.error("Pairing code error:", err.message);
+                    pairingCodeRequested = false; // Allow retry if it failed
                 }
             }, 6000);
         }
@@ -70,4 +74,3 @@ async function startBot() {
 }
 
 startBot();
-;
