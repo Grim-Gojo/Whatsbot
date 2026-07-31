@@ -1,26 +1,4 @@
 /**
- * ============================================================
- * TEMPORARY ONE-TIME CLEANUP — force-clears a stale/corrupted
- * auth_info folder (fixes "Bad MAC Error" / "No matching sessions
- * found"). Leave this in for ONE deploy, confirm the log line
- * below appears, then DELETE this block and redeploy again so it
- * doesn't wipe your session on every future restart.
- * ============================================================
- */
-const fsCleanup = require('fs');
-try {
-  fsCleanup.rmSync('./auth_info', { recursive: true, force: true });
-  console.log('[cleanup] auth_info cleared manually — remove this block after confirming this log line.');
-} catch (err) {
-  console.log('[cleanup] Nothing to clear or error:', err.message);
-}
-/**
- * ============================================================
- * END TEMPORARY CLEANUP BLOCK
- * ============================================================
- */
-
-/**
  * WhatsApp bot (Baileys) — hardened for Render deployment.
  *
  * Fixes applied vs. the previous version:
@@ -35,6 +13,10 @@ try {
  *     so you don't lose a session that was actually fine.
  *  4. Express server binds to 0.0.0.0 and process.env.PORT, required
  *     for Render's port detection.
+ *  5. Removed the one-time cleanup block that was force-deleting
+ *     auth_info on EVERY startup (this was the cause of the endless
+ *     logout/re-pair loop and WhatsApp rate-limiting your pairing
+ *     code requests).
  */
 
 require('dotenv').config();
@@ -199,3 +181,4 @@ startBot().catch((err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('[process] Unhandled rejection:', reason);
 });
+      
