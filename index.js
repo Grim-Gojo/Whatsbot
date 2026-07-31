@@ -16,9 +16,7 @@ const {
 const app = express();
 
 const PORT = process.env.PORT || 3000;
-
 const OWNER_NUMBER = (process.env.OWNER_NUMBER || "").replace(/\D/g, "");
-
 const AUTH_DIR = path.join(__dirname, "auth_info");
 
 if (!OWNER_NUMBER) {
@@ -56,7 +54,6 @@ app.listen(PORT, "0.0.0.0", () => {
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
-
     const { version, isLatest } = await fetchLatestBaileysVersion();
 
     console.log(
@@ -93,9 +90,7 @@ async function startBot() {
 
         if (connection === "close") {
             connectionStatus = "Disconnected";
-
             const statusCode = lastDisconnect?.error?.output?.statusCode;
-
             console.log("Disconnected:", statusCode);
 
             const loggedOut =
@@ -104,7 +99,6 @@ async function startBot() {
 
             if (loggedOut) {
                 console.log("Logged out. Clearing old session...");
-
                 try {
                     fs.rmSync(AUTH_DIR, {
                         recursive: true,
@@ -120,7 +114,6 @@ async function startBot() {
             }
 
             console.log("Reconnecting...");
-
             setTimeout(() => {
                 startBot();
             }, 3000);
@@ -152,10 +145,8 @@ async function startBot() {
 
         for (const msg of messages) {
             if (!msg.message) continue;
-            if (msg.key.fromMe) continue;
 
             const chatId = msg.key.remoteJid;
-
             const text =
                 msg.message.conversation ||
                 msg.message.extendedTextMessage?.text ||
@@ -166,18 +157,23 @@ async function startBot() {
             const command = text.trim().toLowerCase();
 
             // 1. Ping Command
-            if (command === "!ping" || command === "ping") {
-                await sock.sendMessage(chatId, {
-                    text: "🏓 Pong!"
-                });
+            if (command === "!ping" || command === ".ping" || command === "ping") {
+                await sock.sendMessage(chatId, { text: "🏓 Pong!" });
                 continue;
             }
 
-            // 2. Menu / Help Command
-            if (command === "!menu" || command === "!help" || command === "menu") {
-                const menuText = `🤖 *WhatsApp Bot Menu* 🤖\n\n` +
+            // 2. Menu Command
+            if (
+                command === "!menu" ||
+                command === ".menu" ||
+                command === "menu" ||
+                command === "!help" ||
+                command === ".help"
+            ) {
+                const menuText =
+                    `🤖 *WhatsApp Bot Menu* 🤖\n\n` +
                     `*General Commands:*\n` +
-                    `• \`!ping\` - Check responsiveness\n` +
+                    `• \`!ping\` / \`.ping\` - Check responsiveness\n` +
                     `• \`!menu\` - View all commands\n` +
                     `• \`!owner\` - View bot owner contact\n` +
                     `• \`!time\` - Check current date & time\n\n` +
@@ -185,7 +181,7 @@ async function startBot() {
                     `• \`!joke\` - Get a random joke\n` +
                     `• \`!quote\` - Get an inspirational quote\n` +
                     `• \`!fact\` - Get a random fun fact\n` +
-                    `• \`!kick\` - Remove a user from a group (mention/reply)\n` +
+                    `• \`!kick\` - Remove user from group (mention/reply)\n` +
                     `• \`!ai <prompt>\` - Chat with Gemini AI\n\n` +
                     `_Powered by Baileys & Gemini_`;
 
@@ -194,7 +190,7 @@ async function startBot() {
             }
 
             // 3. Owner Command
-            if (command === "!owner" || command === "owner") {
+            if (command === "!owner" || command === ".owner" || command === "owner") {
                 await sock.sendMessage(chatId, {
                     text: `👑 *Bot Owner Number:* +${OWNER_NUMBER}`
                 });
@@ -202,7 +198,7 @@ async function startBot() {
             }
 
             // 4. Time Command
-            if (command === "!time" || command === "time") {
+            if (command === "!time" || command === ".time" || command === "time") {
                 const currentTime = new Date().toLocaleString();
                 await sock.sendMessage(chatId, {
                     text: `⏰ *Current Time:* ${currentTime}`
@@ -211,7 +207,7 @@ async function startBot() {
             }
 
             // 5. Joke Command
-            if (command === "!joke" || command === "joke") {
+            if (command === "!joke" || command === ".joke" || command === "joke") {
                 const jokes = [
                     "Why don't scientists trust atoms? Because they make up everything!",
                     "Why did the scarecrow win an award? Because he was outstanding in his field!",
@@ -225,7 +221,7 @@ async function startBot() {
             }
 
             // 6. Quote Command
-            if (command === "!quote" || command === "quote") {
+            if (command === "!quote" || command === ".quote" || command === "quote") {
                 const quotes = [
                     "\"The best way to predict the future is to create it.\" – Peter Drucker",
                     "\"Do what you can, with what you have, where you are.\" – Theodore Roosevelt",
@@ -238,11 +234,11 @@ async function startBot() {
             }
 
             // 7. Fact Command
-            if (command === "!fact" || command === "fact") {
+            if (command === "!fact" || command === ".fact" || command === "fact") {
                 const facts = [
-                    "🧠 Honey never spoils. Archaeologists have found pots of honey in ancient Egyptian tombs over 3,000 years old that are still edible!",
+                    "🧠 Honey never spoils. Archaeologists have found pots of honey in ancient Egyptian tombs over 3,000 years old!",
                     "🐙 Octopuses have three hearts and blue blood.",
-                    "🍌 Bananas are curved because they grow towards the sun against gravity—a process called negative geotropism.",
+                    "🍌 Bananas are curved because they grow towards the sun against gravity.",
                     "⚡ Lightning strikes the Earth about 100 times every second."
                 ];
                 const randomFact = facts[Math.floor(Math.random() * facts.length)];
@@ -250,66 +246,91 @@ async function startBot() {
                 continue;
             }
 
-            // 8. Group Kick Command: !kick (mention or reply)
-            if (command.startsWith("!kick")) {
+            // 8. Group Kick Command
+            if (command.startsWith("!kick") || command.startsWith(".kick")) {
                 if (!chatId.endsWith("@g.us")) {
-                    await sock.sendMessage(chatId, { text: "⚠️ This command can only be used inside groups!" });
+                    await sock.sendMessage(chatId, {
+                        text: "⚠️ This command can only be used inside groups!"
+                    });
                     continue;
                 }
 
                 let targetJid = null;
-                if (msg.message.extendedTextMessage?.contextInfo?.mentionedJid?.length > 0) {
-                    targetJid = msg.message.extendedTextMessage.contextInfo.mentionedJid[0];
-                } else if (msg.message.extendedTextMessage?.contextInfo?.participant) {
-                    targetJid = msg.message.extendedTextMessage.contextInfo.participant;
+                if (
+                    msg.message.extendedTextMessage?.contextInfo?.mentionedJid
+                        ?.length > 0
+                ) {
+                    targetJid =
+                        msg.message.extendedTextMessage.contextInfo.mentionedJid[0];
+                } else if (
+                    msg.message.extendedTextMessage?.contextInfo?.participant
+                ) {
+                    targetJid =
+                        msg.message.extendedTextMessage.contextInfo.participant;
                 }
 
                 if (!targetJid) {
-                    await sock.sendMessage(chatId, { text: "⚠️ Please mention the user or reply to their message to kick them, e.g., !kick @user" });
+                    await sock.sendMessage(chatId, {
+                        text: "⚠️ Please mention the user or reply to their message to kick them, e.g., !kick @user"
+                    });
                     continue;
                 }
 
                 try {
                     await sock.groupParticipantsUpdate(chatId, [targetJid], "remove");
-                    await sock.sendMessage(chatId, { text: `✅ Successfully removed the user from the group.` });
+                    await sock.sendMessage(chatId, {
+                        text: "✅ Successfully removed the user from the group."
+                    });
                 } catch (err) {
                     console.error("Kick Error:", err);
-                    await sock.sendMessage(chatId, { text: "⚠️ Failed to kick user. Make sure the bot is an admin of this group." });
+                    await sock.sendMessage(chatId, {
+                        text: "⚠️ Failed to kick user. Make sure the bot is an admin of this group."
+                    });
                 }
                 continue;
             }
 
-            // 9. Gemini AI Auto-Reply Command: !ai <prompt>
-            if (text.startsWith("!ai ")) {
+            // 9. Gemini AI Command: !ai <prompt> or .ai <prompt>
+            if (text.startsWith("!ai ") || text.startsWith(".ai ")) {
                 const prompt = text.slice(4).trim();
                 if (!prompt) {
-                    await sock.sendMessage(chatId, { text: "Please provide a prompt, e.g., !ai Hello" });
+                    await sock.sendMessage(chatId, {
+                        text: "Please provide a prompt, e.g., !ai Hello"
+                    });
                     continue;
                 }
 
                 try {
                     const apiKey = process.env.GEMINI_API_KEY;
                     if (!apiKey) {
-                        await sock.sendMessage(chatId, { text: "⚠️ GEMINI_API_KEY is not configured on Render." });
+                        await sock.sendMessage(chatId, {
+                            text: "⚠️ GEMINI_API_KEY is not configured on Render."
+                        });
                         continue;
                     }
 
-                    // Call Gemini API
-                    const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            contents: [{ parts: [{ text: prompt }] }]
-                        })
-                    });
+                    const response = await fetch(
+                        `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${apiKey}`,
+                        {
+                            method: "POST",
+                            headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify({
+                                contents: [{ parts: [{ text: prompt }] }]
+                            })
+                        }
+                    );
 
                     const data = await response.json();
-                    const replyText = data.candidates?.[0]?.content?.parts?.[0]?.text || "Sorry, I couldn't generate a response.";
+                    const replyText =
+                        data.candidates?.[0]?.content?.parts?.[0]?.text ||
+                        "Sorry, I couldn't generate a response.";
 
                     await sock.sendMessage(chatId, { text: replyText });
                 } catch (err) {
                     console.error("AI Error:", err);
-                    await sock.sendMessage(chatId, { text: "⚠️ Error communicating with the AI service." });
+                    await sock.sendMessage(chatId, {
+                        text: "⚠️ Error communicating with the AI service."
+                    });
                 }
             }
         }
@@ -334,4 +355,4 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (err) => {
     console.error("Uncaught Exception:", err);
 });
-                    
+            
