@@ -1,5 +1,26 @@
 /**
- * WhatsApp bot (Bail/**
+ * ============================================================
+ * TEMPORARY ONE-TIME CLEANUP — force-clears a stale/corrupted
+ * auth_info folder (fixes "Bad MAC Error" / "No matching sessions
+ * found"). Leave this in for ONE deploy, confirm the log line
+ * below appears, then DELETE this block and redeploy again so it
+ * doesn't wipe your session on every future restart.
+ * ============================================================
+ */
+const fsCleanup = require('fs');
+try {
+  fsCleanup.rmSync('./auth_info', { recursive: true, force: true });
+  console.log('[cleanup] auth_info cleared manually — remove this block after confirming this log line.');
+} catch (err) {
+  console.log('[cleanup] Nothing to clear or error:', err.message);
+}
+/**
+ * ============================================================
+ * END TEMPORARY CLEANUP BLOCK
+ * ============================================================
+ */
+
+/**
  * WhatsApp bot (Baileys) — hardened for Render deployment.
  *
  * Fixes applied vs. the previous version:
@@ -198,89 +219,3 @@ startBot().catch((err) => {
 process.on('unhandledRejection', (reason) => {
   console.error('[process] Unhandled rejection:', reason);
 });
-eys) — hardened for Render deployment.
- *
- * Fixes applied vs. the previous version:
- *  1. Always fetches the LATEST Baileys/WhatsApp protocol version at
- *     startup instead of relying on whatever the library defaults to.
- *  2. Pairing code requests are now GUARDED — only one code is
- *     requested at a time, with a cooldown, so a reconnect loop can't
- *     spam WhatsApp with new codes before you've had a chance to type
- *     one in.
- *  3. auth_info is only wiped on a REAL logout (loggedOut / 401),
- *     never on ordinary reconnects (408 timeouts, network hiccups),
- *     so you don't lose a session that was actually fine.
- *  4. Express server binds to 0.0.0.0 and process.env.PORT, required
- *     for Render's port detection.
- */
-
-require('dotenv').config();
-const express = require('express');
-const fs = require('fs');
-const path = require('path');
-const P = require('pino');
-
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  fetchLatestBaileysVersion,
-  DisconnectReason,
-  Browsers,
-} = require('@whiskeysockets/baileys');
-
-const AUTH_DIR = path.join(__dirname, 'auth_info');
-const OWNER_NUMBER = (process.env.OWNER_NUMBER || '').replace(/[^0-9]/g, '');
-
-if (!OWNER_NUMBER) {
-  console.error('[startup] OWNER_NUMBER is missing or empty. Set it in your environment variables — digits only, e.g. 2348012345678');
-  process.exit(1);
-}
-
-// ---------------------------------------------------------------
-// Express health-check server (Render needs an open port to detect
-// the service as "live" — this alone doesn't do anything for
-// WhatsApp, it just satisfies the platform).
-// ---------------------------------------------------------------
-const app = express();
-const PORT = process.env.PORT || 3000;
-
-let lastPairingCode = null;
-let connectionStatus = 'starting';
-
-app.get('/', (req, res) => {
-  res.send(`WhatsApp bot status: ${connectionStatus}`);
-});
-
-// Handy for checking the current pairing code from a browser if you
-// miss it in the logs — visit /pairing-code on your Render URL.
-app.get('/pairing-code', (req, res) => {
-  if (connectionStatus === 'connected') {
-    return res.send('Already connected — no pairing code needed.');
-  }
-  res.send(lastPairingCode ? `Current pairing code: ${lastPairingCode}` : 'No pairing code generated yet — check back in a few seconds.');
-});
-
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`[server] Listening on 0.0.0.0:${PORT}`);
-});
-
-// ---------------------------------------------------------------
-// Pairing-code guard: prevents requesting a new code every time the
-// socket reconnects. Once a code is requested, we wait a full
-// cooldown window before allowing another request, even if the
-// socket bounces in the meantime.
-// ---------------------------------------------------------------
-let pairingInProgress = false;
-const PAIRING_COOLDOWN_MS = 45_000; // 45 seconds to actually type the code in
-
-async function maybeRequestPairingCode(sock) {
-  if (sock.authState.creds.registered) return; // already linked
-  if (pairingInProgress) return; // a code was just issued, don't spam another
-
-  pairingInProgress = true;
-  try {
-    const code = await sock.requestPairingCode(OWNER_NUMBER);
-    lastPairingCode = code;
-    console.log('==================================================');
-    console.log(' YOUR PAIRING CODE:', code);
-    console.log(' Open WhatsApp on your phone > Linked Devices >');
