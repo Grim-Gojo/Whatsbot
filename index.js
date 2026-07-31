@@ -1,25 +1,42 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
-const qrcode = require('qrcode-terminal');
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState('auth_info');
+    
     const sock = makeWASocket({
         auth: state,
-        printQRInTerminal: true
+        printQRInTerminal: false
     });
 
     sock.ev.on('creds.update', saveCreds);
 
-    sock.ev.on('connection.update', (update) => {
-        const { connection, lastDisconnect, qr } = update;
-        if (qr) {
-            qrcode.generate(qr, { small: true });
+    sock.ev.on('connection.update', async (update) => {
+        const { connection, lastDisconnect } = update;
+
+        // Request pairing code if device is not registered yet
+        if (!sock.authState.creds.registered) {
+            const phoneNumber = process.env.OWNER_NUMBER;
+            if (phoneNumber) {
+                setTimeout(async () => {
+                    try {
+                        const cleanNumber = phoneNumber.replace(/[^0-9]/g, '');
+                        let code = await sock.requestPairingCode(cleanNumber);
+                        code = code?.match(/.{1,4}/g)?.join("-") || code;
+                        console.log("\n========================================");
+                        console.log(`  YOUR PAIRING CODE: ${code}`);
+                        console.log("========================================\n");
+                    } catch (err) {
+                        console.error("Failed to generate pairing code:", err);
+                    }
+                }, 3000);
+            }
         }
+
         if (connection === 'close') {
             const shouldReconnect = (lastDisconnect?.error?.output?.statusCode !== DisconnectReason.loggedOut);
             if (shouldReconnect) startBot();
         } else if (connection === 'open') {
-            console.log('WhatsApp Bot connected successfully!');
+            console.log('✅ WhatsApp Bot connected successfully!');
         }
     });
 
