@@ -30,8 +30,6 @@ let lastPairingCode = null;
 let pairingInProgress = false;
 let connectionStatus = "Starting";
 
-const PAIRING_COOLDOWN = 45000;
-
 app.get("/", (req, res) => {
     res.send({
         status: connectionStatus,
@@ -55,38 +53,6 @@ app.get("/pairing-code", (req, res) => {
 app.listen(PORT, "0.0.0.0", () => {
     console.log(`✅ Server running on port ${PORT}`);
 });
-
-async function requestPairing(sock) {
-    if (pairingInProgress) return;
-
-    pairingInProgress = true;
-
-    try {
-        if (sock.authState?.creds?.registered) {
-            pairingInProgress = false;
-            return;
-        }
-
-        const code = await sock.requestPairingCode(OWNER_NUMBER);
-
-        lastPairingCode = code;
-
-        console.log("");
-        console.log("====================================");
-        console.log("PAIRING CODE");
-        console.log(code);
-        console.log("====================================");
-        console.log("");
-
-    } catch (err) {
-        console.log("Pairing request failed.");
-        console.log(err.message);
-    }
-
-    setTimeout(() => {
-        pairingInProgress = false;
-    }, PAIRING_COOLDOWN);
-}
 
 async function startBot() {
     const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
@@ -112,7 +78,6 @@ async function startBot() {
 
         if (connection === "connecting") {
             connectionStatus = "Connecting";
-            await requestPairing(sock);
         }
 
         if (connection === "open") {
@@ -162,6 +127,27 @@ async function startBot() {
         }
     });
 
+    // Safely request pairing code after socket initializes and connects
+    if (!sock.authState.creds.registered && !pairingInProgress) {
+        pairingInProgress = true;
+        setTimeout(async () => {
+            try {
+                console.log(`Requesting pairing code for ${OWNER_NUMBER}...`);
+                let code = await sock.requestPairingCode(OWNER_NUMBER);
+                code = code?.match(/.{1,4}/g)?.join("-") || code;
+                lastPairingCode = code;
+
+                console.log("\n========================================");
+                console.log(`  YOUR PAIRING CODE: ${code}`);
+                console.log("========================================\n");
+            } catch (err) {
+                console.error("Pairing request failed:", err.message);
+            } finally {
+                pairingInProgress = false;
+            }
+        }, 6000);
+    }
+
     sock.ev.on("messages.upsert", async ({ messages, type }) => {
         if (type !== "notify") return;
 
@@ -207,4 +193,3 @@ process.on("unhandledRejection", (reason) => {
 process.on("uncaughtException", (err) => {
     console.error("Uncaught Exception:", err);
 });
-           
