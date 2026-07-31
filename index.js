@@ -1,5 +1,6 @@
 const { makeWASocket, useMultiFileAuthState, DisconnectReason } = require('@whiskeysockets/baileys');
 const express = require('express');
+const fs = require('fs');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -31,14 +32,20 @@ async function startBot() {
             const statusCode = lastDisconnect?.error?.output?.statusCode;
             console.log(`Connection closed due to statusCode ${statusCode}, reconnecting...`);
             
-            if (statusCode !== DisconnectReason.loggedOut) {
+            // If session is logged out or unauthorized (401), clear auth and retry fresh
+            if (statusCode === DisconnectReason.loggedOut || statusCode === 401) {
+                console.log('Session expired or logged out. Clearing auth_info for a fresh code...');
+                try {
+                    fs.rmSync('auth_info', { recursive: true, force: true });
+                } catch (e) {}
+                pairingCodeRequested = false;
                 setTimeout(startBot, 3000);
             } else {
-                console.log('Session logged out. Please clear auth_info and restart.');
+                setTimeout(startBot, 3000);
             }
         } else if (connection === 'open') {
             console.log('✅ WhatsApp Bot connected successfully!');
-            pairingCodeRequested = false; // Reset flag on successful connection
+            pairingCodeRequested = false;
         }
     });
 
@@ -77,4 +84,5 @@ async function startBot() {
 }
 
 startBot();
+
 
